@@ -18,3 +18,5 @@ wheel>=0.43.0
 # CMake reste requis *uniquement* si la roue ne se télécharge pas;
 # on fixe une version compatible dlib (< 3.27) pour éviter l’erreur.
 cmake==3.24.0
+# CSRT dépend de opencv-contrib
+opencv-contrib-python
