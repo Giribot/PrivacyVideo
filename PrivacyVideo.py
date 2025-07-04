@@ -1,20 +1,19 @@
 #!/usr/bin/env python
-"""face_blur_app.py — visages & plaques (stockage local contrôlé)
+"""PrivacyVideo.py — Floutage sélectif de visages (pré‑visualisation optionnelle)
 
-• Tous les fichiers temporaires (vignettes, .tmp OpenCV, cache YOLO) vont
-  dans   ./temp/
-• Vidéos finales incrémentées dans   ./Output/
-• Interface : sliders + checkbox plaques.
+Fonctions :
+• Détecte les visages (dlib/face_recognition) et floute ceux requis.
+• Stocke **tous** les fichiers temporaires dans ./temp, vidéos finales incrémentées dans ./Output.
+• Pré‑visualisation légère : une miniature 320 px toutes N frames (option).
 """
-
 # --------------------------------------------------------------------------- #
 # Imports                                                                     #
 # --------------------------------------------------------------------------- #
-import os
-import cv2, face_recognition, numpy as np, tempfile, shutil
-from ultralytics import YOLO
+import os, tempfile, shutil
 from pathlib import Path
 from collections import Counter
+
+import cv2, face_recognition, numpy as np
 from tqdm import tqdm
 import gradio as gr
 
@@ -25,14 +24,15 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 TEMP_ROOT  = SCRIPT_DIR / "temp";   TEMP_ROOT.mkdir(exist_ok=True)
 OUTPUT_DIR = SCRIPT_DIR / "Output"; OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Redirect Python/tempfile + OpenCV + Ultralytics cache to local folders
 os.environ["TMP"] = os.environ["TEMP"] = str(TEMP_ROOT)
-os.environ["ULTRALYTICS_HOME"] = str(SCRIPT_DIR / ".ultra")
-# Force tempfile to use our directory
+# Force tempfile à utiliser TEMP_ROOT
 tempfile.tempdir = str(TEMP_ROOT)
 
+# --------------------------------------------------------------------------- #
+# Utilitaires                                                                 #
+# --------------------------------------------------------------------------- #
 
-def next_output_path(stem="output", ext=".mp4") -> Path:
+def next_output_path(stem: str = "output", ext: str = ".mp4") -> Path:
     i = 0
     while True:
         p = OUTPUT_DIR / f"{stem}{i if i else ''}{ext}"
@@ -40,31 +40,19 @@ def next_output_path(stem="output", ext=".mp4") -> Path:
             return p
         i += 1
 
-# --------------------------------------------------------------------------- #
-# Modèles                                                                     #
-# --------------------------------------------------------------------------- #
-try:
-    PLATE_MODEL = YOLO("yolov8n-license_plate.pt")
-except Exception as e:
-    print("[!] YOLO licence-plate non chargé :", e)
-    PLATE_MODEL = None
 
-# --------------------------------------------------------------------------- #
-# Utilitaires                                                                 #
-# --------------------------------------------------------------------------- #
-
-def blur_face(frame, box, k=99, sigma=30, margin=0.0):
+def blur_region(img, box, margin=0.0, k=99, sigma=30):
     t, r, b, l = box
-    h, w = frame.shape[:2]
+    h, w = img.shape[:2]
     dx, dy = int((r - l) * margin), int((b - t) * margin)
     l, r = max(0, l - dx), min(w, r + dx)
     t, b = max(0, t - dy), min(h, b + dy)
-    roi = frame[t:b, l:r]
+    roi = img[t:b, l:r]
     if roi.size:
-        frame[t:b, l:r] = cv2.GaussianBlur(roi, (k, k), sigma)
+        img[t:b, l:r] = cv2.GaussianBlur(roi, (k, k), sigma)
 
 
-def assign_id(enc, bank, thr):
+def assign_id(enc: np.ndarray, bank: list[tuple[np.ndarray, int]], thr: float):
     if not bank:
         return None
     dists = face_recognition.face_distance([e for e, _ in bank], enc)
@@ -75,7 +63,7 @@ def assign_id(enc, bank, thr):
 # Inventaire visages                                                          #
 # --------------------------------------------------------------------------- #
 
-def detect_faces(video_path, sample_rate, thr, max_thumbs=20):
+def detect_faces(video_path: str, sample_rate: int, thr: float, max_thumbs: int = 20):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError("Impossible d’ouvrir la vidéo.")
@@ -92,7 +80,7 @@ def detect_faces(video_path, sample_rate, thr, max_thumbs=20):
             break
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         boxes = face_recognition.face_locations(rgb, model="hog")
-        encs = face_recognition.face_encodings(rgb, boxes)
+        encs  = face_recognition.face_encodings(rgb, boxes)
         for box, enc in zip(boxes, encs):
             uid = assign_id(enc, bank, thr)
             if uid is None:
@@ -100,91 +88,97 @@ def detect_faces(video_path, sample_rate, thr, max_thumbs=20):
             counts[uid] += 1
             if uid not in thumbs:
                 t, r, b, l = box
-                crop = frame[t:b, l:r]
-                p = tmp_dir / f"id_{uid}.jpg"; cv2.imwrite(str(p), crop)
-                thumbs[uid] = p
+                cv2.imwrite(str(tmp_dir / f"id_{uid}.jpg"), frame[t:b, l:r])
+                thumbs[uid] = tmp_dir / f"id_{uid}.jpg"
     cap.release()
 
     displayed = [uid for uid, _ in counts.most_common(max_thumbs)]
-    gallery = [[str(thumbs[uid]), f"id {uid}"] for uid in displayed]
-    choices = [str(uid) for uid in displayed]
+    gallery   = [[str(thumbs[uid]), f"id {uid}"] for uid in displayed]
+    choices   = [str(uid) for uid in displayed]
     ctx = {"bank": [(e.tolist(), uid) for e, uid in bank],
            "video": video_path,
            "tmp_dir": str(tmp_dir)}
     return gallery, gr.update(choices=choices, value=[]), ctx
 
 # --------------------------------------------------------------------------- #
-# Floutage complet                                                            #
+# Traitement vidéo complet                                                    #
 # --------------------------------------------------------------------------- #
 
-def process_video(ctx, keep_ids_str, keep_mode, thr, margin, blur_plates):
+def process_video(ctx, keep_ids_str, keep_mode, thr, margin,
+                  preview_on, preview_every):
+    """Génère la vidéo floutée. Prév. optionnelle toutes N frames."""
+
     keep_ids = {int(x) for x in keep_ids_str}
     bank = [(np.array(e), uid) for e, uid in ctx["bank"]]
 
     cap = cv2.VideoCapture(ctx["video"])
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    fps = cap.get(cv2.CAP_PROP_FPS)
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v"); fps = cap.get(cv2.CAP_PROP_FPS)
     w, h = int(cap.get(3)), int(cap.get(4))
-    out_path = next_output_path()
-    writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
+    out_p = next_output_path(); writer = cv2.VideoWriter(str(out_p), fourcc, fps, (w, h))
 
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_idx = 0
+
     for _ in tqdm(range(total), desc="Floutage"):
-        ok, frame = cap.read(); 0
+        ok, frame = cap.read()
         if not ok:
             break
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         boxes = face_recognition.face_locations(rgb, model="hog")
-        encs = face_recognition.face_encodings(rgb, boxes)
+        encs  = face_recognition.face_encodings(rgb, boxes)
         for box, enc in zip(boxes, encs):
             uid = assign_id(enc, bank, thr)
-            blur = (uid not in keep_ids) if keep_mode else (uid in keep_ids)
-            if blur:
-                blur_face(frame, box, margin=margin)
+            should_blur = (uid not in keep_ids) if keep_mode else (uid in keep_ids)
+            if should_blur:
+                blur_region(frame, box, margin)
 
-        if blur_plates and PLATE_MODEL is not None:
-            results = PLATE_MODEL.predict(source=frame, conf=0.3, iou=0.5, verbose=False)
-            for r in results:
-                for xyxy in r.boxes.xyxy:
-                    x1, y1, x2, y2 = map(int, xyxy)
-                    blur_face(frame, (y1, x2, y2, x1), margin=0.05)
         writer.write(frame)
 
+        if preview_on and frame_idx % preview_every == 0:
+            thumb = cv2.resize(frame, (320, int(h * 320 / w)))
+            yield {"preview": thumb}
+        frame_idx += 1
+
     cap.release(); writer.release(); shutil.rmtree(ctx["tmp_dir"], ignore_errors=True)
-
-    # Nettoyage éventuel des .tmp OpenCV restants
     for tmp in TEMP_ROOT.glob("wct*.tmp"):
-        try:
-            tmp.unlink()
-        except PermissionError:
-            pass
+        tmp.unlink(missing_ok=True)
 
-    return str(out_path)
+    yield {"video": str(out_p)}
 
 # --------------------------------------------------------------------------- #
 # Interface Gradio                                                            #
 # --------------------------------------------------------------------------- #
 
 def build_ui():
-    with gr.Blocks(title="Floutage de visages & plaques") as demo:
-        gr.Markdown("### Floutez visages et plaques d’immatriculation d’une vidéo.")
+    with gr.Blocks(title="Floutage de visages") as demo:
+        gr.Markdown("### Floutez les visages d’une vidéo.")
         with gr.Row():
-            video_input = gr.Video(label="Vidéo d’entrée (MP4…)")
-            gallery = gr.Gallery(label="Visages détectés", columns=[6])
+            video_in  = gr.Video(label="Vidéo d’entrée (MP4…)")
+            gallery   = gr.Gallery(label="Visages détectés", columns=[6])
         with gr.Accordion("Paramètres avancés", open=False):
-            sample_rate_slider = gr.Slider(1, 30, 10, 1, label="Échantillonnage inventaire (frames)",
-                                          info="Analyse 1 frame sur N durant l’inventaire.")
-            thr_slider = gr.Slider(0.35, 0.80, 0.48, 0.01, label="Seuil de reconnaissance (thr)",
-                                   info="0.35 strict → 0.80 permissif : fusion des poses d'un même visage.")
-            margin_slider = gr.Slider(0.0, 0.30, 0.0, 0.01, label="Marge de flou (%)",
-                                      info="Agrandit la zone floutée autour du visage.")
+            sample_r = gr.Slider(1, 30, 10, 1, label="Échantillonnage (frames)")
+            thr_s    = gr.Slider(0.35, 0.80, 0.48, 0.01, label="Seuil de reconnaissance (thr)")
+            margin_s = gr.Slider(0.0, 0.30, 0.0, 0.01, label="Marge de flou (%)")
+            preview_chk = gr.Checkbox(label="Prévisualiser (1 frame sur N)", value=False)
+            preview_every = gr.Slider(1, 60, 15, 1, label="N (frames)")
+        keep_sel  = gr.CheckboxGroup(label="Visages à garder nets (id)")
+        detect_b  = gr.Button("🔍 Détecter")
+        keep_mode = gr.Checkbox(label="Tout flouter sauf sélection", value=True)
+        process_b = gr.Button("🚀 Flouter vidéo")
         with gr.Row():
-            keep_select = gr.CheckboxGroup(label="Visages à garder nets (id)")
-            detect_btn = gr.Button("🔍 Déetecter les visages")
-        keep_mode = gr.Checkbox(label="Tout flouter sauf la sélection", value=True,
-                              info="Coché : seuls les visages sélectionnés resteront nets.")
-        blur_plates_chk = gr.Checkbox(label="Flouter les plaques d'immatriculation", value=False,
-                                      info="Utilise YOLOv8 licence-plate. Plus lent sur CPU.")
-        with gr.Row():
-            process_btn = gr.Button("🚀 Lancer le floutage")
-            output
+            preview_img = gr.Image(label="Prévisualisation", interactive=False)
+            video_out   = gr.Video(label="Vidéo floutée")
+        ctx_state = gr.State()
+
+        detect_b.click(detect_faces,
+                        inputs=[video_in, sample_r, thr_s],
+                        outputs=[gallery, keep_sel, ctx_state])
+
+        process_b.click(
+                        fn=process_video,
+                        inputs=[ctx_state, keep_sel, keep_mode, thr_s, margin_s, preview_chk, preview_every],
+                        outputs=[preview_img, video_out])
+    return demo
+
+if __name__ == "__main__":
+    build_ui().launch(share=False, show_api=False)

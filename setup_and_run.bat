@@ -62,7 +62,7 @@ IF NOT EXIST "privacyVideo.py" (
     ECHO [!] privacyVideo.py not found
     EXIT /B 1
 )
-ECHO [+] Running praivacyVideo.py ...
+ECHO [+] Running privacyVideo.py ...
 python privacyVideo.py %*
 
 ENDLOCAL
