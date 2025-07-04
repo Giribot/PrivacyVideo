@@ -106,8 +106,11 @@ def detect_faces(video_path: str, sample_rate: int, thr: float, max_thumbs: int 
 
 def process_video(ctx, keep_ids_str, keep_mode, thr, margin,
                   preview_on, preview_every):
-    """Génère la vidéo floutée. Prév. optionnelle toutes N frames."""
-
+    """Génère la vidéo floutée.
+    Renvoie SYSTÉMATIQUEMENT deux outputs :
+    1. l'image de prévisualisation (ou gr.update())
+    2. le chemin de la vidéo finale (ou gr.update() pendant le streaming)
+    """
     keep_ids = {int(x) for x in keep_ids_str}
     bank = [(np.array(e), uid) for e, uid in ctx["bank"]]
 
@@ -134,16 +137,18 @@ def process_video(ctx, keep_ids_str, keep_mode, thr, margin,
 
         writer.write(frame)
 
+        # Prévisualisation : retourne thumb, vidéo inchangée
         if preview_on and frame_idx % preview_every == 0:
             thumb = cv2.resize(frame, (320, int(h * 320 / w)))
-            yield {"preview": thumb}
+            yield thumb, gr.update()
         frame_idx += 1
 
     cap.release(); writer.release(); shutil.rmtree(ctx["tmp_dir"], ignore_errors=True)
     for tmp in TEMP_ROOT.glob("wct*.tmp"):
         tmp.unlink(missing_ok=True)
 
-    yield {"video": str(out_p)}
+    # Dernier yield : image inchangée, nouvelle vidéo prête
+    yield gr.update(), str(out_p)}
 
 # --------------------------------------------------------------------------- #
 # Interface Gradio                                                            #
