@@ -1,0 +1,20 @@
+# requirements.txt — Windows 11 (64‑bit) / Python 3.10
+# ----------------------------------------------------
+# Inclus : installation automatique de la roue pré‑compilée « dlib ».
+#   Pip téléchargera directement le .whl ci‑dessous ➜ plus aucune compilation.
+# ----------------------------------------------------
+# UI Web
+gradio>=4.46.0
+# Vision / ML
+# dlib (wheel pré‑compilée — cp310, win_amd64) :
+https://github.com/z-mahmud22/Dlib_Windows_Python3.x/raw/main/dlib-19.22.99-cp310-cp310-win_amd64.whl
+face_recognition==1.3.0
+opencv-python==4.9.0.80
+# Yolo V8 (détecteur de plaques d'immatriculation)
+ultralytics==8.2.0
+# Utilitaires
+tqdm==4.66.0
+wheel>=0.43.0
+# CMake reste requis *uniquement* si la roue ne se télécharge pas;
+# on fixe une version compatible dlib (< 3.27) pour éviter l’erreur.
+cmake==3.24.0
